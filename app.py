@@ -232,18 +232,35 @@ def import_link(url, folder, offset, seconds):
             s = int(s)
             return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
         raw = Path(folder)/"import_raw.mp4"
-        dl = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
+        base_dl = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
               "--playlist-end", "1", "--socket-timeout", "12", "--retries", "3",
               "--use-extractors", "youtube,twitch.*,kick.*,vimeo", "--js-runtimes", "node",
               "-f", "best[height<=720][vcodec!=none][acodec!=none]/bestvideo[height<=720]+bestaudio/best[vcodec!=none]",
               "--download-sections", f"*{_hms(offset)}-{_hms(offset+seconds)}",
-              "-o", str(raw), "--force-overwrites", "--", media_url(url)]
-        try:
-            done = subprocess.run(dl, capture_output=True, timeout=seconds*3+120)
-        except subprocess.TimeoutExpired:
-            raise ValueError("La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.")
-        if done.returncode or not raw.exists() or raw.stat().st_size == 0:
-            raise ValueError("La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.")
+              "-o", str(raw), "--force-overwrites"]
+        # Segundo intento con el cliente Android de YouTube: el cliente web
+        # de los servidores de Streamlit suele ser bloqueado por YouTube
+        # (403 / "Sign in to confirm you're not a bot"), el de Android no
+        # necesita JS ni PO token y suele pasar.
+        attempts = [base_dl, base_dl + ["--extractor-args", "youtube:player_client=android"]]
+        last_err = ""
+        done = None
+        for dl in attempts:
+            if raw.exists():
+                raw.unlink()
+            try:
+                done = subprocess.run(dl + ["--", media_url(url)],
+                                      capture_output=True, timeout=seconds*3+120)
+            except subprocess.TimeoutExpired:
+                last_err = "tiempo agotado"
+                continue
+            last_err = (done.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-3:]
+            last_err = " | ".join(last_err)
+            if done.returncode == 0 and raw.exists() and raw.stat().st_size > 0:
+                break
+        if done is None or done.returncode or not raw.exists() or raw.stat().st_size == 0:
+            detail = f" (yt-dlp: {last_err[:300]})" if last_err else ""
+            raise ValueError(f"La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.{detail}")
         ff = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
               "-i", str(raw), "-t", str(seconds),
               "-vf", "scale=w='min(960,iw)':h=-2,fps=24,format=yuv420p",
