@@ -235,14 +235,21 @@ def import_link(url, folder, offset, seconds):
         base_dl = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
               "--playlist-end", "1", "--socket-timeout", "12", "--retries", "3",
               "--use-extractors", "youtube,twitch.*,kick.*,vimeo", "--js-runtimes", "node",
-              "-f", "best[height<=720][vcodec!=none][acodec!=none]/bestvideo[height<=720]+bestaudio/best[vcodec!=none]",
               "--download-sections", f"*{_hms(offset)}-{_hms(offset+seconds)}",
               "-o", str(raw), "--force-overwrites"]
-        # Segundo intento con el cliente Android de YouTube: el cliente web
-        # de los servidores de Streamlit suele ser bloqueado por YouTube
-        # (403 / "Sign in to confirm you're not a bot"), el de Android no
-        # necesita JS ni PO token y suele pasar.
-        attempts = [base_dl, base_dl + ["--extractor-args", "youtube:player_client=android"]]
+        # YouTube aplica SABR-only a los servidores de Streamlit: los
+        # formatos separados (video+audio) no traen URL. Intentos:
+        # 1) cliente web normal, 2) cliente Android, 3) formato 18
+        # (360p, video+audio en un solo archivo, suele quedar fuera de
+        # SABR), 4) cliente mweb.
+        fmt_default = ["-f", "best[height<=720][vcodec!=none][acodec!=none]/bestvideo[height<=720]+bestaudio/best[vcodec!=none]"]
+        fmt_muxed = ["-f", "18/best[height<=360][vcodec!=none][acodec!=none]/best[height<=360]"]
+        attempts = [
+            base_dl + fmt_default,
+            base_dl + ["--extractor-args", "youtube:player_client=android"] + fmt_default,
+            base_dl + fmt_muxed,
+            base_dl + ["--extractor-args", "youtube:player_client=mweb"] + fmt_default,
+        ]
         last_err = ""
         done = None
         for dl in attempts:
