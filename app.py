@@ -7,50 +7,41 @@ from tempfile import TemporaryDirectory
 
 
 def _ensure_pot_server():
-    """Arranca el servidor local de PO tokens (bgutil) para YouTube.
+    """Arranca el servidor local de PO tokens (bgutil) para YouTube, en
+    segundo plano y sin bloquear la carga de la app.
 
     YouTube exige un GVS PO Token a los servidores de Streamlit y sin él
     solo ofrece formatos SABR que yt-dlp no puede bajar. El plugin
     bgutil-ytdlp-pot-provider genera ese token, pero necesita su servidor
-    Node corriendo en localhost:4416. Si algo falla, la app sigue igual
-    que antes: solo se pierde este intento extra.
+    Node corriendo en localhost:4416.
+
+    Lección 2026-11-14: la versión anterior hacía git clone + npm ci
+    al importar la app y dejaba la pantalla en negro varios minutos.
+    Ahora solo arranca el servidor si el build YA existe; si no existe,
+    no hace nada y la app carga normal.
     """
     import shutil
     import socket
-    import time
+    import threading
     try:
         with socket.create_connection(("127.0.0.1", 4416), timeout=1):
             return
     except OSError:
         pass
-    try:
-        node = shutil.which("node")
-        if not node:
+
+    def _start():
+        try:
+            node = shutil.which("node")
+            build = Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "main.js"
+            if not node or not build.exists():
+                return
+            log = open("/tmp/bgutil-server.log", "ab")
+            subprocess.Popen([node, str(build)], stdout=log, stderr=log,
+                             start_new_session=True)
+        except Exception:
             return
-        home = Path.home()
-        repo = home / "bgutil-ytdlp-pot-provider"
-        server = repo / "server"
-        build = server / "build" / "main.js"
-        if not build.exists():
-            if not server.exists():
-                subprocess.run(["git", "clone", "--depth", "1",
-                                "https://github.com/Brainicism/bgutil-ytdlp-pot-provider",
-                                str(repo)], capture_output=True, timeout=180)
-            subprocess.run(["npm", "ci"], cwd=str(server), capture_output=True, timeout=300)
-            subprocess.run(["npx", "tsc"], cwd=str(server), capture_output=True, timeout=300)
-        if not build.exists():
-            return
-        log = open("/tmp/bgutil-server.log", "ab")
-        subprocess.Popen([node, str(build)], stdout=log, stderr=log,
-                         start_new_session=True)
-        for _ in range(10):
-            try:
-                with socket.create_connection(("127.0.0.1", 4416), timeout=1):
-                    return
-            except OSError:
-                time.sleep(1)
-    except Exception:
-        return
+
+    threading.Thread(target=_start, daemon=True).start()
 
 
 _ensure_pot_server()
