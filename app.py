@@ -391,12 +391,12 @@ def _import_link_download(url, folder, offset, seconds):
         base_dl = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
               "--playlist-end", "1", "--socket-timeout", "12", "--retries", "3",
               "--use-extractors", "youtube,twitch.*,kick.*,vimeo", "--js-runtimes", "node",
-              # yt-dlp necesita ffmpeg para cortar el tramo (--download-sections)
-              # y en Streamlit Cloud no está en el PATH: se le pasa la ruta
-              # COMPLETA del binario de imageio-ffmpeg (el mismo que usa la
-              # app). OJO: pasar solo su carpeta NO sirve, porque el binario
-              # se llama ffmpeg-linux-x86_64-v7.0.2 y yt-dlp busca "ffmpeg".
-              "--ffmpeg-location", FFMPEG,
+              # yt-dlp necesita el ffmpeg DEL SISTEMA para cortar el tramo
+              # (--download-sections); viene de packages.txt. NO pasar el
+              # ffmpeg de imageio-ffmpeg: verificado 2026-11-14 que ese
+              # binario estático se cierra con código -11 cuando lo invoca
+              # yt-dlp (con el ffmpeg del sistema el mismo comando da 15 s
+              # exactos), así que --ffmpeg-location aquí empeora el error.
               "--download-sections", f"*{_hms(offset)}-{_hms(offset+seconds)}",
               "-o", str(raw), "--force-overwrites"]
         # YouTube aplica SABR-only a los servidores de Streamlit: los
