@@ -1,0 +1,14 @@
+streamlit==1.50.0
+faster-whisper==1.2.1
+mediapipe==0.10.21
+opencv-contrib-python==4.11.0.86
+moviepy==2.2.1
+imageio-ffmpeg==0.6.0
+numpy==1.26.4
+Pillow==11.3.0
+protobuf==4.25.8
+jax==0.4.35
+jaxlib==0.4.35
+yt-dlp[default]>=2026.3.17,<2027
+nodejs-wheel>=22.15,<25
+requests>=2.32.4,<3
