@@ -411,7 +411,7 @@ def _import_link_download(url, folder, offset, seconds):
         # formatos separados (video+audio) no traen URL. Intentos:
         # 1) cliente web normal, 2) cliente Android, 3) formato 18
         # (360p, video+audio en un solo archivo, suele quedar fuera de
-        # SABR), 4) cliente mweb.
+        # SABR), 4) cliente mweb, 5) cliente TV.
         fmt_default = ["-f", "best[height<=720][vcodec!=none][acodec!=none]/bestvideo[height<=720]+bestaudio/best[vcodec!=none]"]
         fmt_muxed = ["-f", "18/best[height<=360][vcodec!=none][acodec!=none]/best[height<=360]"]
         attempts = [
@@ -419,6 +419,7 @@ def _import_link_download(url, folder, offset, seconds):
             base_dl + ["--extractor-args", "youtube:player_client=android"] + fmt_default,
             base_dl + fmt_muxed,
             base_dl + ["--extractor-args", "youtube:player_client=mweb"] + fmt_default,
+            base_dl + ["--extractor-args", "youtube:player_client=tv"] + fmt_default,
         ]
         last_err = ""
         done = None
@@ -435,6 +436,36 @@ def _import_link_download(url, folder, offset, seconds):
             last_err = " | ".join(last_err)
             if done.returncode == 0 and raw.exists() and raw.stat().st_size > 0:
                 break
+        if done is None or done.returncode or not raw.exists() or raw.stat().st_size == 0:
+            # Última vía: Cobalt (API pública y gratuita, sin clave) resuelve
+            # el video a una URL directa desde su propia infraestructura y
+            # ffmpeg lee el tramo de ahí. Si esto también falla, YouTube está
+            # bloqueando todo desde Streamlit y queda solo subir el archivo.
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    "https://co.api.cobalt.tools/",
+                    data=json.dumps({"url": media_url(url), "vCodec": "h264",
+                                     "vQuality": "720", "aFormat": "mp3",
+                                     "filenameStyle": "basic",
+                                     "isAudioOnly": False}).encode(),
+                    headers={"Accept": "application/json",
+                             "Content-Type": "application/json"},
+                    method="POST")
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    cob = json.loads(resp.read())
+                direct = cob.get("url") if cob.get("status") in ("stream", "redirect") else ""
+                if direct:
+                    if raw.exists():
+                        raw.unlink()
+                    ff_dl = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+                             "-ss", str(offset), "-i", direct, "-t", str(seconds),
+                             "-c", "copy", str(raw)]
+                    got = subprocess.run(ff_dl, capture_output=True, timeout=seconds*3+120)
+                    if got.returncode == 0 and raw.exists() and raw.stat().st_size > 0:
+                        done = got
+            except Exception:
+                pass
         if done is None or done.returncode or not raw.exists() or raw.stat().st_size == 0:
             detail = f" (yt-dlp: {last_err[:300]})" if last_err else ""
             raise ValueError(f"La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.{detail}")
@@ -654,6 +685,15 @@ def main():
         offset = st.number_input("Inicio en el video original (s)", 0, step=1, on_change=reset)
         seconds = st.selectbox("Segundos a importar", [30,60,120,300], index=1, on_change=reset)
         st.caption("En un directo se captura desde el momento de conexión. En un video grabado se usa el inicio elegido.")
+        # Diagnóstico visible: si el servidor de tokens no está activo,
+        # YouTube bloquea los enlaces desde aquí.
+        try:
+            import socket as _s
+            _sock = _s.create_connection(("127.0.0.1", 4416), timeout=1)
+            _sock.close()
+            st.caption("Servidor de YouTube: activo")
+        except Exception:
+            st.caption("Servidor de YouTube: instalándose… si sigue así, los enlaces de YouTube pueden fallar")
     if st.button("Analizar video", type="primary", disabled=origin!="Archivo" and not url.strip()):
         progress = st.progress(0, text="Leyendo el video…")
         try:
