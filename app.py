@@ -391,6 +391,10 @@ def _import_link_download(url, folder, offset, seconds):
         base_dl = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
               "--playlist-end", "1", "--socket-timeout", "12", "--retries", "3",
               "--use-extractors", "youtube,twitch.*,kick.*,vimeo", "--js-runtimes", "node",
+              # yt-dlp necesita ffmpeg para cortar el tramo (--download-sections)
+              # y en Streamlit Cloud no está en el PATH: se le pasa el ffmpeg
+              # que ya trae imageio-ffmpeg (el mismo que usa la app).
+              "--ffmpeg-location", str(Path(FFMPEG).parent),
               "--download-sections", f"*{_hms(offset)}-{_hms(offset+seconds)}",
               "-o", str(raw), "--force-overwrites"]
         # YouTube aplica SABR-only a los servidores de Streamlit: los
