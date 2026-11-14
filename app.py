@@ -239,7 +239,120 @@ def media_url(value):
     return value.strip()
 
 
+def _read_link_hls(url, folder, offset, seconds):
+    """Primer intento para YouTube (de app_1.py): HLS con web_safari.
+
+    Pide a yt-dlp los formatos HLS (m3u8) del cliente web_safari y lee el
+    flujo directamente con ffmpeg. Si el formato no está disponible, el
+    flujo no es HTTPS o la lectura falla con 403/404/429, lanza
+    ConnectionError para que import_link pruebe la siguiente ruta.
+    """
+    import json
+    import shutil
+    import sys
+    import time
+    import urllib.parse
+    from urllib.parse import urlsplit
+
+    url = media_url(url)
+    format_spec = ("best[protocol^=m3u8][height<=720]/"
+                   "bestvideo[protocol^=m3u8][height<=720]+bestaudio[protocol^=m3u8]")
+    cmd = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
+           "--playlist-end", "1", "--socket-timeout", "12", "--retries", "1",
+           "--use-extractors", "youtube,twitch.*,kick.*,vimeo", "--js-runtimes", "node",
+           "--extractor-args", "youtube:player_client=web_safari",
+           "-f", format_spec,
+           "--dump-single-json", "--", url]
+    meta = subprocess.run(cmd, capture_output=True, timeout=90)
+    if meta.returncode:
+        errors = [line.lower() for line in meta.stderr.decode(errors="replace").splitlines()
+                  if "error:" in line.lower()]
+        reason = "formato HLS no disponible"
+        if any("403" in line for line in errors):
+            reason = "el servidor recibió HTTP 403"
+        elif any("sign in" in line or "login" in line for line in errors):
+            reason = "la plataforma solicitó iniciar sesión"
+        raise ConnectionError(f"HLS: {reason}")
+    info = json.loads(meta.stdout)
+    if info.get("_type") in ("playlist", "multi_video") or info.get("live_status") == "is_upcoming":
+        raise ValueError("Elige un video individual o un directo que ya haya empezado.")
+    live = info.get("is_live") is True
+    offset = 0 if live else int(offset)
+    if info.get("duration") and not live and offset >= info["duration"]:
+        raise ValueError("El inicio elegido supera la duración del video.")
+    streams = info.get("requested_formats") or [info]
+    ff = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
+    for stream in streams:
+        address = stream.get("url", "")
+        if urlsplit(address).scheme != "https" or stream.get("has_drm"):
+            raise ConnectionError("HLS: esta fuente no ofrece un flujo HTTPS compatible.")
+        headers = {**(info.get("http_headers") or {}), **(stream.get("http_headers") or {})}
+        lines = [f"{k}: {v}" for k, v in headers.items() if k.lower() in
+                 ("user-agent", "referer", "origin", "accept", "accept-language")
+                 and "\r" not in str(v) and "\n" not in str(v)]
+        ff += ["-protocol_whitelist", "https,tls,tcp,crypto", "-rw_timeout", "15000000"]
+        if lines:
+            ff += ["-headers", "\r\n".join(lines) + "\r\n"]
+        if offset:
+            ff += ["-ss", str(offset)]
+        ff += ["-i", address]
+    out = Path(folder) / "import.mp4"
+    ff += ["-map", "0:v:0", "-map", f"{len(streams)-1}:a:0?", "-t", str(seconds),
+           "-vf", "scale=w='min(960,iw)':h=-2,fps=24,format=yuv420p",
+           "-threads", "2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+           "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out)]
+    if shutil.disk_usage(folder).free < 200 * 1024 ** 2:
+        raise ValueError("Espacio temporal insuficiente. Intenta un poco más tarde.")
+    with (Path(folder) / "lectura.log").open("w+b") as log, subprocess.Popen(
+            ff, stdout=subprocess.DEVNULL, stderr=log) as proc:
+        deadline = time.monotonic() + seconds * 3 + 90
+        try:
+            while proc.poll() is None:
+                if time.monotonic() > deadline or (out.exists() and out.stat().st_size > 150 * 1024 ** 2):
+                    raise ValueError("El tramo superó el tiempo o tamaño disponible. Prueba con menos segundos.")
+                time.sleep(.4)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+        if proc.returncode:
+            log.seek(0)
+            errors = log.read(32768).lower()
+            reason = next((f"HTTP {code}" for code in (403, 404, 429)
+                           if str(code).encode() in errors), "falló la lectura del medio")
+            raise ConnectionError(f"HLS: {reason}")
+    return str(out), str(info.get("title") or "Video importado"), offset, live
+
+
 def import_link(url, folder, offset, seconds):
+    """Importa un enlace: en YouTube prueba primero HLS (web_safari) y,
+    si falla la lectura, reintenta con las rutas de descarga de yt-dlp.
+    En las demás plataformas va directo a la descarga."""
+    from urllib.parse import urlsplit
+    failures = []
+    host = urlsplit(media_url(url)).hostname or ""
+    youtube = any(host == domain or host.endswith("." + domain)
+                  for domain in ("youtube.com", "youtu.be"))
+    if youtube:
+        try:
+            return _read_link_hls(url, folder, offset, seconds)
+        except (ConnectionError, subprocess.TimeoutExpired) as exc:
+            failures.append("tiempo de espera agotado" if isinstance(exc, subprocess.TimeoutExpired) else str(exc))
+        except ValueError as exc:
+            # Errores de uso (playlist, directo no empezado, inicio fuera
+            # de duración) no son fallo de ruta: no se reintentan.
+            if str(exc).startswith(("Elige un video", "El inicio elegido", "Espacio temporal", "El tramo superó")):
+                raise
+            failures.append(str(exc))
+    try:
+        return _import_link_download(url, folder, offset, seconds)
+    except ValueError as exc:
+        failures.append(str(exc))
+    raise ValueError("No se pudo importar este enlace. " + " · ".join(dict.fromkeys(failures))
+                     + ". Si tienes el video, selecciona Archivo para continuar.")
+
+
+def _import_link_download(url, folder, offset, seconds):
     import json
     import shutil
     import sys
@@ -342,7 +455,8 @@ def import_link(url, folder, offset, seconds):
            "-vf","scale=w='min(960,iw)':h=-2,fps=24,format=yuv420p",
            "-threads","2","-c:v","libx264","-preset","ultrafast","-crf","26",
            "-c:a","aac","-b:a","96k","-movflags","+faststart",str(out)]
-    with subprocess.Popen(ff, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
+    with (Path(folder)/"lectura.log").open("w+b") as log, subprocess.Popen(
+            ff, stdout=subprocess.DEVNULL, stderr=log) as proc:
         deadline = time.monotonic() + seconds*3 + 90
         try:
             while proc.poll() is None:
@@ -354,7 +468,11 @@ def import_link(url, folder, offset, seconds):
                 proc.kill()
             proc.wait()
         if proc.returncode:
-            raise ValueError("La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.")
+            log.seek(0)
+            errors = log.read(32768).lower()
+            reason = next((f"HTTP {code}" for code in (403, 404, 429)
+                           if str(code).encode() in errors), "falló la lectura del medio")
+            raise ValueError(f"La plataforma interrumpió la lectura ({reason}). Prueba con un tramo más corto o sube el archivo.")
     return str(out), str(info.get("title") or "Video importado"), offset, live
 
 
