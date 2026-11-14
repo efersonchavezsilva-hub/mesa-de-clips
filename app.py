@@ -219,6 +219,41 @@ def import_link(url, folder, offset, seconds):
     offset = 0 if live else int(offset)
     if info.get("duration") and not live and offset >= info["duration"]:
         raise ValueError("El inicio elegido supera la duración del video.")
+    out = Path(folder)/"import.mp4"
+    if shutil.disk_usage(folder).free < 200*1024**2:
+        raise ValueError("Espacio temporal insuficiente. Intenta un poco más tarde.")
+    # Descargar el tramo con yt-dlp en vez de leer el flujo con ffmpeg:
+    # YouTube corta la lectura directa del flujo (403 / stream cerrado),
+    # mientras que yt-dlp maneja reintentos, throttling y el corte por tramo.
+    # Solo los directos en vivo siguen por ffmpeg, porque yt-dlp no puede
+    # cortar un tramo de un directo con --download-sections.
+    if not live:
+        def _hms(s):
+            s = int(s)
+            return f"{s//3600:02d}:{(s%3600)//60:02d}:{s%60:02d}"
+        raw = Path(folder)/"import_raw.mp4"
+        dl = [sys.executable, "-m", "yt_dlp", "--ignore-config", "--no-playlist",
+              "--playlist-end", "1", "--socket-timeout", "12", "--retries", "3",
+              "--use-extractors", "youtube,twitch.*,kick.*,vimeo", "--js-runtimes", "node",
+              "-f", "best[height<=720][vcodec!=none][acodec!=none]/bestvideo[height<=720]+bestaudio/best[vcodec!=none]",
+              "--download-sections", f"*{_hms(offset)}-{_hms(offset+seconds)}",
+              "-o", str(raw), "--force-overwrites", "--", media_url(url)]
+        try:
+            done = subprocess.run(dl, capture_output=True, timeout=seconds*3+120)
+        except subprocess.TimeoutExpired:
+            raise ValueError("La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.")
+        if done.returncode or not raw.exists() or raw.stat().st_size == 0:
+            raise ValueError("La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.")
+        ff = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+              "-i", str(raw), "-t", str(seconds),
+              "-vf", "scale=w='min(960,iw)':h=-2,fps=24,format=yuv420p",
+              "-threads", "2", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+              "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out)]
+        conv = subprocess.run(ff, capture_output=True, timeout=seconds*3+90)
+        raw.unlink(missing_ok=True)
+        if conv.returncode or not out.exists() or out.stat().st_size == 0:
+            raise ValueError("La plataforma interrumpió la lectura. Prueba con un tramo más corto o sube el archivo.")
+        return str(out), str(info.get("title") or "Video importado"), offset, live
     streams = info.get("requested_formats") or [info]
     import urllib.parse
     ff = [FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
@@ -236,13 +271,10 @@ def import_link(url, folder, offset, seconds):
         if offset:
             ff += ["-ss", str(offset)]
         ff += ["-i", address]
-    out = Path(folder)/"import.mp4"
     ff += ["-map","0:v:0","-map",f"{len(streams)-1}:a:0?", "-t",str(seconds),
            "-vf","scale=w='min(960,iw)':h=-2,fps=24,format=yuv420p",
            "-threads","2","-c:v","libx264","-preset","ultrafast","-crf","26",
            "-c:a","aac","-b:a","96k","-movflags","+faststart",str(out)]
-    if shutil.disk_usage(folder).free < 200*1024**2:
-        raise ValueError("Espacio temporal insuficiente. Intenta un poco más tarde.")
     with subprocess.Popen(ff, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
         deadline = time.monotonic() + seconds*3 + 90
         try:
