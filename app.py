@@ -5,6 +5,56 @@ from functools import lru_cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+
+def _ensure_pot_server():
+    """Arranca el servidor local de PO tokens (bgutil) para YouTube.
+
+    YouTube exige un GVS PO Token a los servidores de Streamlit y sin él
+    solo ofrece formatos SABR que yt-dlp no puede bajar. El plugin
+    bgutil-ytdlp-pot-provider genera ese token, pero necesita su servidor
+    Node corriendo en localhost:4416. Si algo falla, la app sigue igual
+    que antes: solo se pierde este intento extra.
+    """
+    import shutil
+    import socket
+    import time
+    try:
+        with socket.create_connection(("127.0.0.1", 4416), timeout=1):
+            return
+    except OSError:
+        pass
+    try:
+        node = shutil.which("node")
+        if not node:
+            return
+        home = Path.home()
+        repo = home / "bgutil-ytdlp-pot-provider"
+        server = repo / "server"
+        build = server / "build" / "main.js"
+        if not build.exists():
+            if not server.exists():
+                subprocess.run(["git", "clone", "--depth", "1",
+                                "https://github.com/Brainicism/bgutil-ytdlp-pot-provider",
+                                str(repo)], capture_output=True, timeout=180)
+            subprocess.run(["npm", "ci"], cwd=str(server), capture_output=True, timeout=300)
+            subprocess.run(["npx", "tsc"], cwd=str(server), capture_output=True, timeout=300)
+        if not build.exists():
+            return
+        log = open("/tmp/bgutil-server.log", "ab")
+        subprocess.Popen([node, str(build)], stdout=log, stderr=log,
+                         start_new_session=True)
+        for _ in range(10):
+            try:
+                with socket.create_connection(("127.0.0.1", 4416), timeout=1):
+                    return
+            except OSError:
+                time.sleep(1)
+    except Exception:
+        return
+
+
+_ensure_pot_server()
+
 import imageio_ffmpeg
 import numpy as np
 import streamlit as st
@@ -211,7 +261,9 @@ def import_link(url, folder, offset, seconds):
            "--dump-single-json", "--", media_url(url)]
     meta = subprocess.run(cmd, capture_output=True, timeout=90)
     if meta.returncode:
-        raise ValueError("La plataforma rechazó el enlace o no ofrece video público. Prueba el enlace de un video individual o sube el archivo.")
+        err = (meta.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-2:]
+        detail = f" (yt-dlp: {' | '.join(err)[:300]})" if err else ""
+        raise ValueError(f"La plataforma rechazó el enlace o no ofrece video público. Prueba el enlace de un video individual o sube el archivo.{detail}")
     info = json.loads(meta.stdout)
     if info.get("_type") in ("playlist", "multi_video") or info.get("live_status") == "is_upcoming":
         raise ValueError("Elige un video individual o un directo que ya haya empezado.")
