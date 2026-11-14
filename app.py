@@ -32,12 +32,20 @@ def _ensure_pot_server():
     def _start():
         try:
             node = shutil.which("node")
-            build = Path.home() / "bgutil-ytdlp-pot-provider" / "server" / "build" / "main.js"
+            # Servidor vendoreado en el repo (pot-server/): build ya compilado,
+            # solo falta instalar dependencias con npm ci la primera vez.
+            server = Path(__file__).resolve().parent / "pot-server"
+            build = server / "build" / "main.js"
             if not node or not build.exists():
                 return
             log = open("/tmp/bgutil-server.log", "ab")
+            if not (server / "node_modules").exists():
+                subprocess.run(["npm", "ci", "--no-audit", "--no-fund"],
+                               cwd=str(server), stdout=log, stderr=log, timeout=600)
+            if not build.exists():
+                return
             subprocess.Popen([node, str(build)], stdout=log, stderr=log,
-                             start_new_session=True)
+                             start_new_session=True, cwd=str(server))
         except Exception:
             return
 
